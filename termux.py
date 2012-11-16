@@ -6,9 +6,10 @@ import sys
 import pty
 import signal
 from subprocess import Popen, PIPE
-from threading import Thread
+from threading import Thread, Lock
 
 
+READ_BUF = 4096
 TERM_INIT = True
 
 
@@ -63,10 +64,12 @@ class Termux:
         midx = termw // 2
         midy = termh // 2
         
-        self.screens.append(Screen(1, 1, midx, midy, self))
-        self.screens.append(Screen(midx + 1, 1, termw - midx, midy, self))
-        self.screens.append(Screen(1, midy + 1, midx, termh - midy, self))
-        self.screens.append(Screen(midx + 1, midy + 1, termw - midx, termh - midy, self))
+        self.screens.append(Screen(1, 1, termw, termh, self))
+        
+        #self.screens.append(Screen(1, 1, midx, midy, self))
+        #self.screens.append(Screen(midx + 1, 1, termw - midx, midy, self))
+        #self.screens.append(Screen(1, midy + 1, midx, termh - midy, self))
+        #self.screens.append(Screen(midx + 1, midy + 1, termw - midx, termh - midy, self))
         
         for screen in self.screens:
             screen.daemon = False
@@ -101,7 +104,7 @@ class Screen(Thread):
         self.termux = termux
         self.x = 0
         self.y = 0
-        self.stored = ''
+        self.stored = bytes()
     
     def run(self):
         self.termux.openterminals += 1
@@ -137,10 +140,10 @@ class Screen(Thread):
     
     
     def writeOut(self, data):
-        data = self.stored.encode('utf-8') + data
-        self.stored = ''
+        data = self.stored + data
+        self.stored = bytes()
         
-        if (data[-1] & 192) == 128:
+        if (data[-1] & 128) == 128:
             c = 0
             while (data[~c] & 192) == 128:
                 c += 1
@@ -149,11 +152,11 @@ class Screen(Thread):
                 b = data[~c]
                 while ((b << n) & 128) == 128:
                     n += 1
-                if n > c:
+                if n - 1 > c:
                     self.stored = data[~c:] + self.stored
                     data = data[:~c]
         
-        data = data.decode('utf-8', 'replace')
+        data = data.decode('utf-8', 'replace').replace(chr(127), chr(8)).replace(chr(8), '\033[D \033[D')
         buf = '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
         i = 0
         n = len(data)
@@ -167,7 +170,7 @@ class Screen(Thread):
                 buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
             elif b == '\033':
                 if i == n:
-                    self.stored = b + self.stored
+                    self.stored = b.encode('utf-8') + self.stored
                     break
                 i -= 1
                 b = Util.getcolour(data, i)
@@ -176,26 +179,57 @@ class Screen(Thread):
                     end = b[-1]
                     if (end == '~') or (('a' <= end) and (end <= 'z')) or (('A' <= end) and (end <= 'Z')):
                         if end == 'H':
-                            b = [int(item) for item in b[2 : ~1].split(';')]
-                            if len(b) == 2:
-                                (self.y, self.x) = b
-                                buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
+                            if len(b) == 3:
+                                (self.y, self.x) = (0, 0)
+                                buf += '\033[%i;%iH' % (self.top, self.left)
                             else:
-                                buf += '\033[' + ';'.join(b) + 'H'
+                                b = [int(item) - 1 for item in b[2 : ~1].split(';')]
+                                if len(b) == 2:
+                                    (self.y, self.x) = b
+                                    buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
+                                else:
+                                    buf += '\033[' + ';'.join(b) + 'H'
+                        elif end == 'A':
+                            b = max(1, int('0' + b[2 : ~1].split(';')[-1]))
+                            self.y = max(0, self.y - b)
+                            buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
+                        elif end == 'B':
+                            b = max(1, int('0' + b[2 : ~1].split(';')[-1]))
+                            self.y += b
+                            buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
+                        elif end == 'C':
+                            b = max(1, int('0' + b[2 : ~1].split(';')[-1]))
+                            self.x = min(self.x + b, self.width - 2)
+                            buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
+                        elif end == 'D':
+                            b = max(1, int('0' + b[2 : ~1].split(';')[-1]))
+                            self.x = max(0, self.x + b)
+                            buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
+                        elif end == 'm':
+                            buf += b
                         else:
                             buf += b
                     else:
-                        self.stored = b + self.stored
+                        self.stored = b.encode('utf-8') + self.stored
                         break
                 else:
-                    buf += b
+                    buf += ''.join(['%s ' % d for d in b])
+            elif ord(b) == 7:   pass # buf += b # bell
+            elif ord(b) == 13:  pass # dismis!
+            elif ord(b) < 32:
+                pass
             else:
                 buf += b
                 self.x += 1
+                if self.x >= self.width:
+                    self.x = 0
+                    self.y += 1
+                    buf += '\033[%i;%iH' % (self.top + self.y, self.left + self.x)
         
-        sys.stdout.buffer.write(buf.encode('utf-8'))
+        return buf
 
 
+readMutex = Lock()
 class ReadThread(Thread):
     def __init__(self, reader, writer, screen):
         Thread.__init__(self)
@@ -204,15 +238,18 @@ class ReadThread(Thread):
         self.screen = screen
     
     def run(self):
-        try:
+        #try:
             while not (self.writer.closed or self.reader.closed):
-                b = self.reader.read(1024)
+                b = self.reader.read(READ_BUF)
                 if b is None:
                     continue
-                self.screen.writeOut(b)
+                b = self.screen.writeOut(b)
+                readMutex.acquire()
+                sys.stdout.buffer.write(b.encode('utf-8'))
                 sys.stdout.buffer.flush()
-        except:
-            pass
+                readMutex.release()
+        #except:
+        #    pass
 
 
 '''
@@ -248,22 +285,18 @@ class Util:
                     i += 1
                     di += 1
                     rc += c
-            while c == '0':
-                c = input[i]
-                i += 1
-                rc += c
-            if c == '4':
-                c = input[i]
-                i += 1
-                rc += c
-                if c == ';':
+            else:
+                while c != ';':
                     c = input[i]
                     i += 1
                     rc += c
-                    while c != '\\':
-                        c = input[i]
+                c = rc[2:~1].lstrip('0')
+                map = {'0' : '\007', '1' : '\007', '2' : '\007', '4' : '\033\\'}
+                if c in map:
+                    end = map[c]
+                    while not rc.endswith(end):
+                        rc += input[i]
                         i += 1
-                        rc += c
         elif c == '[':
             while i < n:
                 c = input[i]
@@ -287,7 +320,7 @@ class Util:
         while i < n:
             c = input[i]
             if c == '\033':
-                i += len(Backend.getcolour(input, i))
+                i += len(Util.getcolour(input, i))
             else:
                 i += 1
                 if not UCS.isCombining(c):
