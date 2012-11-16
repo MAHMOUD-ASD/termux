@@ -309,6 +309,37 @@ class Util:
     
     
     '''
+    Checks whether a character is a combining character
+    
+    @param   char:chr  The character to test
+    @return  :bool     Whether the character is a combining character
+    '''
+    @staticmethod
+    def isCombining(char):
+        o = ord(char)
+        if (0x0300 <= o) and (o <= 0x036F):  return True
+        if (0x20D0 <= o) and (o <= 0x20FF):  return True
+        if (0x1DC0 <= o) and (o <= 0x1DFF):  return True
+        if (0xFE20 <= o) and (o <= 0xFE2F):  return True
+        return False
+    
+    
+    '''
+    Gets the number of combining characters in a string
+    
+    @param   string:str  A text to count combining characters in
+    @return  :int        The number of combining characters in the string
+    '''
+    @staticmethod
+    def countCombining(string):
+        rc = 0
+        for char in string:
+            if Util.isCombining(char):
+                rc += 1
+        return rc
+    
+    
+    '''
     Calculates the number of visible characters in a text
     
     @param   input:str  The input buffer
@@ -323,7 +354,7 @@ class Util:
                 i += len(Util.getcolour(input, i))
             else:
                 i += 1
-                if not UCS.isCombining(c):
+                if not Util.isCombining(c):
                     rc += 1
         return rc
 
